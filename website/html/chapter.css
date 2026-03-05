@@ -264,6 +264,27 @@ figure img {
   object-fit: contain;
 }
 
+/* make4ht often emits multi-image figures as <figure><p class="noindent"><img ... */
+figure > p.noindent,
+.figure > p.noindent,
+div.figure > p.noindent {
+  text-align: center;
+  margin: 0;
+}
+
+figure > p.noindent > img,
+.figure > p.noindent > img,
+div.figure > p.noindent > img {
+  display: inline-block;
+  vertical-align: top;
+}
+
+figure > p.noindent > img + img,
+.figure > p.noindent > img + img,
+div.figure > p.noindent > img + img {
+  margin-left: 12px;
+}
+
 /* Multi-panel figure layouts emitted by make4ht */
 figure .figure-row,
 .figure .figure-row,
