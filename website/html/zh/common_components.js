@@ -208,6 +208,7 @@
                 "jan-cavel": {
                     desc: "罗马尼亚语翻译. PRs：[#16](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/16)",
                 },
+                "bill-mark": { desc: "对第4–5章和附录B的大量技术反馈。" },
                 "kevin-murphy": {
                     desc: "大量反馈。Issues：[#3](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/3)、[#4](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/4)、[#5](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/5)、[#8](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/8)、[#10](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/10)、[#11](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/11)、[#12](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/12)、[#13](https://github.com/Ma-Lab-Berkeley/deep-representation-learning-book/pull/13)",
                 },

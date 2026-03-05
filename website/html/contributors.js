@@ -78,6 +78,12 @@
             affil: "University of Hong Kong",
         },
         {
+            id: "bill-mark",
+            name: "Bill Mark",
+            url: "https://www.linkedin.com/in/bill-mark-a51142/",
+            affil: "Independent",
+        },
+        {
             id: "kerui-min",
             name: "Kerui Min",
             url: "https://www.linkedin.com/in/kerui-min-b974b52a/",
