@@ -13,6 +13,8 @@ Responsibilities:
 """
 
 import argparse
+import hashlib
+import html as html_lib
 import json
 import os
 import re
@@ -23,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, Tag
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -551,6 +553,267 @@ def fix_images(soup: BeautifulSoup, build_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# Equation reference recovery
+# ---------------------------------------------------------------------------
+
+_EQ_LABEL_RE = re.compile(r"\\label\s*\{([^}]+)\}")
+_EQREF_MISSING_RE = re.compile(
+    r"<!--\s*(?:POSTPROC_EQREF|EQREF):\s*([^>]*?)\s*-->\s*"
+    r"\(\s*<span[^>]*>\?\?</span>\s*\)",
+    re.IGNORECASE,
+)
+_EQREF_MARKER_RE = re.compile(
+    r"<!--\s*(?:POSTPROC_EQREF|EQREF):\s*[^>]*?-->",
+    re.IGNORECASE,
+)
+_MARKED_REF_MARKER_RE = re.compile(
+    r"<!--\s*POSTPROC_(?:CREF|REF):\s*([^>]*?)\s*-->",
+    re.IGNORECASE,
+)
+_TEX4HT_REF_RE = re.compile(r"tex4ht:\s*ref:\s*(\S+)", re.IGNORECASE)
+_CREF_TOKEN_RE = re.compile(
+    r"<!--\s*POSTPROC_(?:CREF|REF):\s*([^>]*?)\s*-->"
+    r"|<!--\s*tex4ht:\s*ref:\s*([^>]*?)\s*-->"
+    r"|<span[^>]*>\?\?</span>",
+    re.IGNORECASE,
+)
+
+
+def _anchor_id_for_label(label: str) -> str:
+    """Create a stable synthetic anchor id for a TeX label."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", label).strip("-")[:40] or "label"
+    digest = hashlib.sha1(label.encode("utf-8")).hexdigest()[:8]
+    return f"eqref-{safe}-{digest}"
+
+
+def _extract_brace_group(s: str, start: int) -> tuple[Optional[str], int]:
+    """Extract { ... } content and return (content, next_index)."""
+    if start < 0 or start >= len(s) or s[start] != "{":
+        return None, start
+
+    depth = 0
+    group_start = start + 1
+    for i in range(start, len(s)):
+        ch = s[i]
+        if ch == "{" and (i == 0 or s[i - 1] != "\\"):
+            depth += 1
+        elif ch == "}" and (i == 0 or s[i - 1] != "\\"):
+            depth -= 1
+            if depth == 0:
+                return s[group_start:i], i + 1
+    return None, len(s)
+
+
+def _normalize_aux_ref_text(text: str) -> str:
+    """Normalize first newlabel field to plain display text."""
+    out = text.strip()
+    # tex4ht aux uses \rEfLiNK{anchor}{display}
+    for _ in range(4):
+        m = re.search(r"\\rEfLiNK\{[^{}]*\}\{([^{}]*)\}", out)
+        if not m:
+            break
+        out = m.group(1).strip()
+
+    out = out.replace("\\relax", "").replace("\\ignorespaces", "").strip()
+    if out.startswith("{") and out.endswith("}"):
+        out = out[1:-1].strip()
+    return out
+
+
+def load_aux_ref_numbers(aux_path: Optional[Path]) -> dict[str, str]:
+    """Load label -> display-number map from a LaTeX .aux file."""
+    if aux_path is None or not aux_path.exists():
+        return {}
+
+    mapping: dict[str, str] = {}
+    for line in aux_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.startswith("\\newlabel{"):
+            continue
+
+        label_start = line.find("{")
+        label, idx = _extract_brace_group(line, label_start)
+        if not label:
+            continue
+
+        payload_start = line.find("{", idx)
+        payload, _ = _extract_brace_group(line, payload_start)
+        if payload is None:
+            continue
+
+        # payload typically looks like: {<display>}{<page>}...
+        if not payload.startswith("{"):
+            continue
+        display_raw, _ = _extract_brace_group(payload, 0)
+        if display_raw is None:
+            continue
+
+        display = _normalize_aux_ref_text(display_raw)
+        if display:
+            mapping[label] = display
+
+    return mapping
+
+
+def build_eq_label_to_file_map(html_files: list[Path]) -> dict[str, str]:
+    """Map TeX equation labels found in mathjax blocks to the containing file."""
+    mapping: dict[str, str] = {}
+    for html_file in html_files:
+        text = html_file.read_text(encoding="utf-8")
+        for label in _EQ_LABEL_RE.findall(text):
+            mapping.setdefault(label, html_file.name)
+    return mapping
+
+
+def build_label_href_map(html_files: list[Path]) -> dict[str, str]:
+    """Map tex4ht label comments to href targets from resolved links."""
+    mapping: dict[str, str] = {}
+    for html_file in html_files:
+        soup = BeautifulSoup(html_file.read_text(encoding="utf-8"), "html.parser")
+        for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+            m = _TEX4HT_REF_RE.search(str(comment))
+            if not m:
+                continue
+            label = m.group(1).strip()
+            parent = comment.parent
+            if not isinstance(parent, Tag) or parent.name != "a":
+                continue
+            href = parent.get("href")
+            if href:
+                mapping.setdefault(label, href)
+    return mapping
+
+
+def add_equation_label_anchors(soup: BeautifulSoup):
+    """Insert synthetic anchors for all \\label{...} found in mathjax blocks."""
+    for block in soup.find_all("div", class_="mathjax-env"):
+        tex = block.get_text()
+        labels = _EQ_LABEL_RE.findall(tex)
+        if not labels:
+            continue
+        for label in labels:
+            anchor_id = _anchor_id_for_label(label)
+            if soup.find(id=anchor_id):
+                continue
+            anchor = soup.new_tag("a", id=anchor_id)
+            block.insert_before(anchor)
+
+
+def fix_unresolved_eqrefs(
+    html: str,
+    current_file: str,
+    label_to_file: dict[str, str],
+    label_href_map: dict[str, str],
+    aux_ref_numbers: dict[str, str],
+) -> tuple[str, int, int]:
+    """Replace marked '(??)' eqrefs with numbered links using AUX + label map."""
+    repaired = 0
+    still_unresolved = 0
+
+    def _replace(match: re.Match[str]) -> str:
+        nonlocal repaired, still_unresolved
+        label = match.group(1).strip()
+
+        number = aux_ref_numbers.get(label)
+        href = label_href_map.get(label)
+        if not href:
+            target_file = label_to_file.get(label)
+            if target_file:
+                anchor_id = _anchor_id_for_label(label)
+                href = f"#{anchor_id}" if target_file == current_file else f"{target_file}#{anchor_id}"
+
+        if not href or not number:
+            still_unresolved += 1
+            return _EQREF_MARKER_RE.sub("", match.group(0), count=1)
+
+        repaired += 1
+        return f'(<a href="{href}">{html_lib.escape(number)}</a>)'
+
+    html = _EQREF_MISSING_RE.sub(_replace, html)
+    html = _EQREF_MARKER_RE.sub("", html)
+    return html, repaired, still_unresolved
+
+
+def fix_unresolved_marked_refs(
+    html: str,
+    current_file: str,
+    label_to_file: dict[str, str],
+    label_href_map: dict[str, str],
+    aux_ref_numbers: dict[str, str],
+) -> tuple[str, int, int]:
+    """Repair unresolved Cref/ref placeholders using queued label markers."""
+    repaired = 0
+    still_unresolved = 0
+    pending_labels: list[tuple[str, int]] = []
+    out_parts: list[str] = []
+    cursor = 0
+
+    for m in _CREF_TOKEN_RE.finditer(html):
+        out_parts.append(html[cursor:m.start()])
+        cursor = m.end()
+        pos = m.start()
+
+        # Avoid stale markers leaking too far.
+        pending_labels = [(lbl, p) for (lbl, p) in pending_labels if pos - p <= 2000]
+
+        cref_marker = m.group(1)
+        resolved_ref = m.group(2)
+
+        if cref_marker is not None:
+            label = cref_marker.strip()
+            if label:
+                pending_labels.append((label, pos))
+            continue
+
+        if resolved_ref is not None:
+            label = resolved_ref.strip()
+            for idx, (pending, _) in enumerate(pending_labels):
+                if pending == label:
+                    pending_labels.pop(idx)
+                    break
+            out_parts.append(m.group(0))
+            continue
+
+        # Unresolved "??" span
+        if not pending_labels:
+            out_parts.append(m.group(0))
+            continue
+
+        pick_idx = 0
+        if len(pending_labels) > 1:
+            # If some earlier labels in the same marker batch already rendered,
+            # the unresolved placeholder usually corresponds to the last label.
+            marker_window_start = pending_labels[0][1]
+            between = html[marker_window_start:m.start()]
+            if "<a " in between.lower() or re.search(r">\s*[0-9A-Za-z]", between):
+                pick_idx = len(pending_labels) - 1
+
+        label, _ = pending_labels.pop(pick_idx)
+        number = aux_ref_numbers.get(label)
+        href = label_href_map.get(label)
+
+        if not href:
+            target_file = label_to_file.get(label)
+            if target_file:
+                anchor_id = _anchor_id_for_label(label)
+                href = f"#{anchor_id}" if target_file == current_file else f"{target_file}#{anchor_id}"
+
+        if number and href:
+            out_parts.append(f'<a href="{html_lib.escape(href, quote=True)}">{html_lib.escape(number)}</a>')
+            repaired += 1
+        elif number:
+            out_parts.append(html_lib.escape(number))
+            repaired += 1
+        else:
+            out_parts.append(m.group(0))
+            still_unresolved += 1
+
+    out_parts.append(html[cursor:])
+    html = "".join(out_parts)
+    html = _MARKED_REF_MARKER_RE.sub("", html)
+    return html, repaired, still_unresolved
+
+
+# ---------------------------------------------------------------------------
 # Search index
 # ---------------------------------------------------------------------------
 
@@ -649,7 +912,14 @@ def generate_search_index(output_dir: Path):
 # Main processing pipeline
 # ---------------------------------------------------------------------------
 
-def process_file(html_path: Path, build_dir: Path, shared_asset_prefix: str = ""):
+def process_file(
+    html_path: Path,
+    build_dir: Path,
+    label_to_file: dict[str, str],
+    label_href_map: dict[str, str],
+    aux_ref_numbers: dict[str, str],
+    shared_asset_prefix: str = "",
+) -> tuple[int, int, int, int]:
     """Process a single HTML file through all post-processing steps."""
     text = html_path.read_text(encoding="utf-8")
     soup = BeautifulSoup(text, "html.parser")
@@ -662,18 +932,27 @@ def process_file(html_path: Path, build_dir: Path, shared_asset_prefix: str = ""
     tag_algorithm_environments(soup)
     fix_images(soup, build_dir)
     build_mini_toc(soup, filename)
+    add_equation_label_anchors(soup)
 
     # Serialize and clean up
     html = str(soup)
+    html, eq_repaired, eq_unresolved = fix_unresolved_eqrefs(
+        html, filename, label_to_file, label_href_map, aux_ref_numbers
+    )
+    html, cref_repaired, cref_unresolved = fix_unresolved_marked_refs(
+        html, filename, label_to_file, label_href_map, aux_ref_numbers
+    )
     html = re.sub(r"\n[\t \r\f\v]*\n+", "\n", html)
 
     html_path.write_text(html, encoding="utf-8")
+    return eq_repaired, eq_unresolved, cref_repaired, cref_unresolved
 
 
 def main():
     parser = argparse.ArgumentParser(description="Post-process make4ht HTML output")
     parser.add_argument("--input", "-i", required=True, help="Build directory with make4ht output")
     parser.add_argument("--output", "-o", required=True, help="Final output directory (website/html/)")
+    parser.add_argument("--aux", help="Reference .aux file for eqref recovery", default=None)
     args = parser.parse_args()
 
     build_dir = Path(args.input).resolve()
@@ -708,10 +987,45 @@ def main():
 
     # Step 3: Process each HTML file
     html_files = sorted(build_dir.glob("*.html"))
+    label_to_file = build_eq_label_to_file_map(html_files)
+    label_href_map = build_label_href_map(html_files)
+    aux_ref_numbers = load_aux_ref_numbers(Path(args.aux).resolve()) if args.aux else {}
+
+    print(f"\nEquation labels detected: {len(label_to_file)}")
+    print(f"Resolved href labels detected: {len(label_href_map)}")
+    if args.aux and aux_ref_numbers:
+        print(f"Reference numbers loaded from AUX: {len(aux_ref_numbers)}")
+    elif args.aux:
+        print("Warning: AUX map empty; unresolved eqrefs may remain")
+
     print(f"\nProcessing {len(html_files)} HTML files...")
+    total_eq_repaired = 0
+    total_eq_unresolved = 0
+    total_cref_repaired = 0
+    total_cref_unresolved = 0
     for html_file in html_files:
         print(f"  {html_file.name}")
-        process_file(html_file, build_dir, shared_asset_prefix)
+        eq_repaired, eq_unresolved, cref_repaired, cref_unresolved = process_file(
+            html_file,
+            build_dir,
+            label_to_file,
+            label_href_map,
+            aux_ref_numbers,
+            shared_asset_prefix,
+        )
+        total_eq_repaired += eq_repaired
+        total_eq_unresolved += eq_unresolved
+        total_cref_repaired += cref_repaired
+        total_cref_unresolved += cref_unresolved
+
+    print(
+        f"Eqref recovery: repaired={total_eq_repaired}, "
+        f"still-unresolved={total_eq_unresolved}"
+    )
+    print(
+        f"Cref/ref recovery: repaired={total_cref_repaired}, "
+        f"still-unresolved={total_cref_unresolved}"
+    )
 
     # Step 4: Copy to output directory
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -31,6 +31,7 @@ OUTPUT_DIR="${2:-$REPO_ROOT/website/html}"
 [[ "$OUTPUT_DIR" != /* ]] && OUTPUT_DIR="$REPO_ROOT/$OUTPUT_DIR"
 
 BUILD_DIR="$REPO_ROOT/website/_build_${TEX_BASE}"
+REF_AUX="$BUILD_DIR/reference.aux"
 
 CFG_FILE="$PIPELINE_DIR/book.cfg"
 MK4_FILE="$PIPELINE_DIR/book.mk4"
@@ -46,6 +47,38 @@ echo "  Output dir:  $OUTPUT_DIR"
 echo ""
 
 # ---------------------------------------------------------------------------
+# Pre-build: capture a full LaTeX .aux for eqref fallback
+# ---------------------------------------------------------------------------
+# tex4ht can miss some align labels (and older CI tex4ht can miss many refs).
+# Keep a standard LaTeX-generated .aux snapshot before make4ht runs so the
+# postprocessor can recover unresolved \eqref entries.
+mkdir -p "$BUILD_DIR"
+AUX_PATH="$REPO_ROOT/${TEX_BASE}.aux"
+
+echo "[Pre-build] Capturing reference AUX..."
+if [ -f "$AUX_PATH" ] && ! grep -q '\\ifx\\rEfLiNK\\UnDef' "$AUX_PATH"; then
+    cp "$AUX_PATH" "$REF_AUX"
+    echo "  Using existing LaTeX aux: $AUX_PATH"
+else
+    if [ -f "$AUX_PATH" ]; then
+        echo "  Existing aux appears tex4ht-generated; regenerating via latexmk..."
+    else
+        echo "  No aux found; generating via latexmk..."
+    fi
+
+    if latexmk -pdf -interaction=nonstopmode -shell-escape -f "$TEX_PATH" >/dev/null 2>&1; then
+        if [ -f "$AUX_PATH" ]; then
+            cp "$AUX_PATH" "$REF_AUX"
+            echo "  Generated reference aux: $REF_AUX"
+        else
+            echo "  Warning: latexmk completed but $AUX_PATH was not found."
+        fi
+    else
+        echo "  Warning: latexmk aux generation failed; eqref fallback may be limited."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Pre-build: clean stale tex4ht artifacts from repo root
 # ---------------------------------------------------------------------------
 # make4ht writes .xref, .4ct, .4tc, .idv, .lg files to the repo root.
@@ -53,6 +86,9 @@ echo ""
 # next build — e.g. malformed .xref entries cause immediate parse errors.
 echo "[Pre-build] Cleaning stale tex4ht artifacts..."
 rm -f "$REPO_ROOT/${TEX_BASE}".{xref,4ct,4tc,idv,lg}
+# Keep the captured reference AUX, but force tex4ht to start from a clean aux
+# in the repo root to avoid stale-marker contamination across runs.
+rm -f "$AUX_PATH"
 # ---------------------------------------------------------------------------
 # Pre-build: ensure XeTeX format has enough main_memory
 # ---------------------------------------------------------------------------
@@ -78,7 +114,6 @@ fi
 # Stage 1: make4ht
 # ---------------------------------------------------------------------------
 echo "[Stage 1] Running make4ht..."
-mkdir -p "$BUILD_DIR"
 cd "$REPO_ROOT"
 
 # Run make4ht with XeTeX engine, mathjax passthrough, chapter splitting
@@ -127,7 +162,8 @@ echo "[Stage 4] Post-processing..."
 
 uv run python3 "$PIPELINE_DIR/postprocess.py" \
     --input "$BUILD_DIR" \
-    --output "$OUTPUT_DIR"
+    --output "$OUTPUT_DIR" \
+    --aux "$REF_AUX"
 
 echo ""
 
