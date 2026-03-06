@@ -252,10 +252,88 @@ td.equation-label {
     "Liberation Mono", monospace;
   font-size: 0.95rem;
   line-height: 1.5;
+  display: grid;
+  gap: 0.25rem;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .algorithmic .ALIndent {
   padding-left: 1.5em;
+}
+
+.algorithmic-line {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 0.75rem;
+  align-items: start;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.algorithmic-line-blank {
+  min-height: 0.45rem;
+}
+
+.algorithmic-label,
+.algorithmic-content {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.algorithmic-label {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.algorithmic-content {
+  box-sizing: border-box;
+  padding-left: var(--algorithm-indent, 0);
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.algorithmic-inline-math {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  vertical-align: middle;
+  -webkit-overflow-scrolling: touch;
+}
+
+.algorithmic-inline-math mjx-container {
+  display: inline-block;
+  max-width: none;
+}
+
+.algorithmic-content :is(.algorithmic-block-math, .mathjax-env, .equation, table.equation, .katex-display) {
+  box-sizing: border-box;
+  display: block;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  margin: 0.35rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.algorithmic-content mjx-container[display="true"] {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+.algorithmic-content > :first-child {
+  margin-top: 0;
+}
+
+.algorithmic-content > :last-child {
+  margin-bottom: 0;
 }
 
 /* Algorithm keywords */
@@ -413,6 +491,15 @@ dd.enumerate-enumitem,
 .mini-toc a,
 figcaption.caption,
 div.caption {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.algorithmic,
+.algorithmic-content,
+.algorithmic-content p,
+.algorithmic-content li,
+.algorithmic-content dd {
   overflow-wrap: anywhere;
   word-break: normal;
 }
@@ -658,6 +745,10 @@ pre,
 
   h2 {
     font-size: 1.15rem;
+  }
+
+  .algorithmic-line {
+    column-gap: 0.5rem;
   }
 
   .mini-toc {

@@ -348,6 +348,176 @@ def tag_algorithm_environments(soup: BeautifulSoup):
                 div["class"] = classes + ["algorithm-container"]
 
 
+def normalize_algorithmic_blocks(soup: BeautifulSoup):
+    """Restructure make4ht algorithmic output into wrap-friendly rows.
+
+    make4ht emits algorithmic environments as a flat stream of:
+      <span class="label-*">...</span> text <span class="algorithmic">...</span><br/>
+    This is hard to wrap on narrow screens because indentation is encoded with
+    raw non-breaking spaces inside inline spans. We rewrite each line into a
+    two-column row with an explicit label cell and a shrinkable content cell.
+    """
+    for block in soup.find_all("div", class_="algorithmic"):
+        if block.find("div", class_="algorithmic-line"):
+            _annotate_algorithmic_math(block)
+            continue
+
+        line_nodes: list[Tag | NavigableString] = []
+        line_rows: list[Tag] = []
+
+        for child in list(block.contents):
+            child.extract()
+            if (
+                isinstance(child, Tag)
+                and child.name == "br"
+                and "algorithmic" in (child.get("class") or [])
+            ):
+                row = _build_algorithmic_row(soup, line_nodes)
+                if row is not None:
+                    line_rows.append(row)
+                line_nodes = []
+                continue
+            line_nodes.append(child)
+
+        row = _build_algorithmic_row(soup, line_nodes)
+        if row is not None:
+            line_rows.append(row)
+
+        if not line_rows:
+            continue
+
+        block.clear()
+        for row in line_rows:
+            block.append(row)
+        _annotate_algorithmic_math(block)
+
+
+def _build_algorithmic_row(
+    soup: BeautifulSoup,
+    nodes: list[Tag | NavigableString],
+) -> Tag | None:
+    """Convert one algorithmic line into a structured row."""
+    nodes = [node for node in nodes if not _is_empty_comment(node)]
+    if not nodes:
+        return None
+
+    label_node: Tag | None = None
+    content_nodes = nodes[:]
+
+    while content_nodes and isinstance(content_nodes[0], NavigableString) and not str(content_nodes[0]).strip():
+        content_nodes.pop(0)
+
+    if content_nodes and isinstance(content_nodes[0], Tag):
+        classes = content_nodes[0].get("class") or []
+        if any(str(cls).startswith("label-") for cls in classes):
+            label_node = content_nodes.pop(0)
+
+    flattened_nodes: list[Tag | NavigableString] = []
+    for node in content_nodes:
+        flattened_nodes.extend(_flatten_algorithmic_node(node))
+
+    indent_count = _count_leading_algorithmic_whitespace(flattened_nodes)
+    _trim_algorithmic_whitespace(flattened_nodes)
+
+    row_classes = ["algorithmic-line"]
+    if _nodes_are_blank(flattened_nodes):
+        row_classes.append("algorithmic-line-blank")
+        row = soup.new_tag("div", attrs={"class": row_classes})
+        return row
+
+    row = soup.new_tag("div", attrs={"class": row_classes})
+
+    label = soup.new_tag("div", attrs={"class": "algorithmic-label"})
+    if label_node is not None:
+        label.append(label_node)
+
+    content = soup.new_tag("div", attrs={"class": "algorithmic-content"})
+    if indent_count > 1:
+        content["style"] = f"--algorithm-indent: {min(indent_count - 1, 12)}ch;"
+    for node in flattened_nodes:
+        content.append(node)
+
+    row.append(label)
+    row.append(content)
+    return row
+
+
+def _annotate_algorithmic_math(scope: Tag):
+    """Mark math nodes inside algorithmic content for targeted CSS."""
+    for math_span in scope.find_all("span", class_="mathjax-inline"):
+        classes = math_span.get("class", [])
+        if "algorithmic-inline-math" not in classes:
+            math_span["class"] = classes + ["algorithmic-inline-math"]
+
+    for math_block in scope.find_all("div", class_="mathjax-env"):
+        classes = math_block.get("class", [])
+        if "algorithmic-block-math" not in classes:
+            math_block["class"] = classes + ["algorithmic-block-math"]
+
+
+def _flatten_algorithmic_node(node: Tag | NavigableString) -> list[Tag | NavigableString]:
+    """Unwrap redundant algorithmic spans while preserving inner content."""
+    if isinstance(node, NavigableString):
+        return [node]
+
+    classes = node.get("class") or []
+    if node.name == "span" and "algorithmic" in classes:
+        flattened: list[Tag | NavigableString] = []
+        for child in list(node.contents):
+            child.extract()
+            flattened.extend(_flatten_algorithmic_node(child))
+        return flattened
+
+    return [node]
+
+
+def _count_leading_algorithmic_whitespace(nodes: list[Tag | NavigableString]) -> int:
+    """Measure the leading whitespace used for algorithm indentation."""
+    prefix = []
+    for node in nodes:
+        if not isinstance(node, NavigableString):
+            break
+        text = str(node)
+        prefix.append(text)
+        if text.strip():
+            break
+
+    combined = "".join(prefix).replace("\xa0", " ")
+    match = re.match(r"^\s*", combined)
+    return len(match.group(0)) if match else 0
+
+
+def _trim_algorithmic_whitespace(nodes: list[Tag | NavigableString]):
+    """Trim leading/trailing whitespace from detached algorithm line nodes."""
+    while nodes and isinstance(nodes[0], NavigableString):
+        trimmed = str(nodes[0]).lstrip(" \t\r\n\xa0")
+        if trimmed:
+            nodes[0] = NavigableString(trimmed)
+            break
+        nodes.pop(0)
+
+    while nodes and isinstance(nodes[-1], NavigableString):
+        trimmed = str(nodes[-1]).rstrip(" \t\r\n\xa0")
+        if trimmed:
+            nodes[-1] = NavigableString(trimmed)
+            break
+        nodes.pop()
+
+
+def _nodes_are_blank(nodes: list[Tag | NavigableString]) -> bool:
+    """Return True when the detached line has no visible content."""
+    for node in nodes:
+        text = str(node) if isinstance(node, NavigableString) else node.get_text(" ", strip=True)
+        if text.strip():
+            return False
+    return True
+
+
+def _is_empty_comment(node: Tag | NavigableString) -> bool:
+    """Ignore HTML comments when normalizing algorithm lines."""
+    return isinstance(node, Comment)
+
+
 # ---------------------------------------------------------------------------
 # Mini-TOC
 # ---------------------------------------------------------------------------
@@ -1369,6 +1539,7 @@ def process_file(
     remove_make4ht_navigation(soup)
     tag_theorem_environments(soup)
     tag_algorithm_environments(soup)
+    normalize_algorithmic_blocks(soup)
     fix_images(soup, build_dir)
     enhance_subfigure_layouts(soup)
     normalize_math_spacing_commands(soup)
