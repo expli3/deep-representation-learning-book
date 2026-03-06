@@ -59,6 +59,10 @@ MANIFEST_PATH="$RUN_DIR/manifest.json"
 SNAPSHOT_TEX_PATH="$SOURCE_SNAPSHOT/$TEX_REL"
 SNAPSHOT_AUX_PATH="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.aux"
 REF_AUX="$STAGE_AUX/reference.aux"
+SNAPSHOT_BBL_PATH="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.bbl"
+SNAPSHOT_BCF_PATH="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.bcf"
+SNAPSHOT_RUNXML_PATH="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.run.xml"
+SNAPSHOT_BLG_PATH="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.blg"
 
 CFG_FILE="$PIPELINE_DIR/book.cfg"
 MK4_FILE="$PIPELINE_DIR/book.mk4"
@@ -135,6 +139,16 @@ else
         echo "  Warning: latexmk aux generation failed; eqref fallback may be limited."
     fi
 fi
+
+# Keep bibliography artifacts available to the isolated make4ht compile. Without
+# these, biblatex citations degrade to raw keys and the bibliography vanishes.
+for ext in bbl bcf run.xml blg; do
+    src="$STAGE_AUX/${TEX_BASE}.${ext}"
+    dst="$(dirname "$SNAPSHOT_TEX_PATH")/${TEX_BASE}.${ext}"
+    if [ -f "$src" ]; then
+        cp "$src" "$dst"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Pre-build: ensure XeTeX format has enough main_memory

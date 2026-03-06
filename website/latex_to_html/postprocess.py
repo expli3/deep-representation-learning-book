@@ -717,10 +717,12 @@ _DISPLAY_ENV_RE = re.compile(
 )
 _CHAPTER_PREFIX_RE = re.compile(r"(?:Chapter|Appendix)\s*([A-Z]|\d+)\b", re.IGNORECASE)
 _SECTION_PREFIX_RE = re.compile(r"([A-Z]|\d+)\.\d+")
+_FULL_EQUATION_NUMBER_RE = re.compile(r"^((?:[A-Z]|\d+)\.\d+)\.(\d+)$")
 _NO_NUMBER_LINE_RE = re.compile(r"\\(?:nonumber|notag)\b|\\tag\*\s*\{")
 _HAS_TAG_RE = re.compile(r"\\tag\*?\s*\{")
 _EXPLICIT_TAG_RE = re.compile(r"\\tag\s*\{([^}]*)\}")
 _ENV_COMMAND_RE = re.compile(r"\\(begin|end)\s*\{([A-Za-z*]+)\}")
+_MANUAL_NUMBER_LINE_RE = re.compile(r"\\(?:labelthis|numberthis)\b")
 
 
 def _anchor_id_for_label(label: str) -> str:
@@ -855,13 +857,14 @@ def add_explicit_equation_tags(soup: BeautifulSoup, aux_ref_numbers: dict[str, s
     for node in list(body.descendants):
         if not isinstance(node, Tag):
             continue
-        if node.name == "h2" and "chapterHead" in (node.get("class") or []):
+        node_classes = node.get("class") or []
+        if _is_heading_tag(node) and "chapterHead" in node_classes:
             chapter_prefix = _extract_chapter_prefix(node)
             if chapter_prefix:
                 current_section_prefix = f"{chapter_prefix}.0"
                 current_equation_index = 0
             continue
-        if node.name == "h3" and "sectionHead" in (node.get("class") or []):
+        if _is_heading_tag(node) and "sectionHead" in node_classes:
             section_prefix = _extract_section_prefix(node)
             if section_prefix:
                 current_section_prefix = section_prefix
@@ -873,7 +876,7 @@ def add_explicit_equation_tags(soup: BeautifulSoup, aux_ref_numbers: dict[str, s
             continue
 
         tex = node.get_text()
-        updated_tex, current_equation_index = _tag_display_math_block(
+        updated_tex, current_section_prefix, current_equation_index = _tag_display_math_block(
             tex,
             current_section_prefix,
             current_equation_index,
@@ -884,6 +887,11 @@ def add_explicit_equation_tags(soup: BeautifulSoup, aux_ref_numbers: dict[str, s
 
         node.clear()
         node.append(NavigableString(updated_tex))
+
+
+def _is_heading_tag(node: Tag) -> bool:
+    """Return True when a tag is any HTML heading element."""
+    return node.name in {"h1", "h2", "h3", "h4", "h5", "h6"}
 
 
 def _extract_section_prefix(heading: Tag) -> Optional[str]:
@@ -910,29 +918,29 @@ def _tag_display_math_block(
     section_prefix: str,
     current_equation_index: int,
     aux_ref_numbers: dict[str, str],
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """Tag every numbered line in a display-math environment."""
     match = _DISPLAY_ENV_RE.match(tex)
     if not match:
-        return tex, current_equation_index
+        return tex, section_prefix, current_equation_index
 
     env_name = match.group(1)
     allow_insert = not env_name.endswith("*")
     base_env_name = env_name[:-1] if env_name.endswith("*") else env_name
     inner = match.group(2)
     if base_env_name in {"equation", "gather"}:
-        tagged_inner, current_equation_index = _tag_display_math_line(
+        tagged_inner, section_prefix, current_equation_index = _tag_display_math_line(
             inner, section_prefix, current_equation_index, aux_ref_numbers, allow_insert
         )
     elif base_env_name in {"align", "eqnarray"}:
-        tagged_inner, current_equation_index = _tag_multiline_display_math(
+        tagged_inner, section_prefix, current_equation_index = _tag_multiline_display_math(
             inner, section_prefix, current_equation_index, aux_ref_numbers, allow_insert
         )
     else:
-        return tex, current_equation_index
+        return tex, section_prefix, current_equation_index
 
     updated_tex = f"\\begin{{{env_name}}}{tagged_inner}\\end{{{env_name}}}"
-    return updated_tex, current_equation_index
+    return updated_tex, section_prefix, current_equation_index
 
 
 def _tag_multiline_display_math(
@@ -941,7 +949,7 @@ def _tag_multiline_display_math(
     current_equation_index: int,
     aux_ref_numbers: dict[str, str],
     allow_insert: bool,
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """Inject explicit tags into each numbered top-level line of align/eqnarray."""
     parts: list[str] = []
     cursor = 0
@@ -969,7 +977,7 @@ def _tag_multiline_display_math(
             and not env_stack
         ):
             segment = inner[cursor:i]
-            tagged_segment, current_equation_index = _tag_display_math_line(
+            tagged_segment, section_prefix, current_equation_index = _tag_display_math_line(
                 segment, section_prefix, current_equation_index, aux_ref_numbers, allow_insert
             )
             parts.append(tagged_segment)
@@ -986,11 +994,11 @@ def _tag_multiline_display_math(
 
         i += 1
     segment = inner[cursor:]
-    tagged_segment, current_equation_index = _tag_display_math_line(
+    tagged_segment, section_prefix, current_equation_index = _tag_display_math_line(
         segment, section_prefix, current_equation_index, aux_ref_numbers, allow_insert
     )
     parts.append(tagged_segment)
-    return "".join(parts), current_equation_index
+    return "".join(parts), section_prefix, current_equation_index
 
 
 def _tag_display_math_line(
@@ -999,37 +1007,40 @@ def _tag_display_math_line(
     current_equation_index: int,
     aux_ref_numbers: dict[str, str],
     allow_insert: bool,
-) -> tuple[str, int]:
+) -> tuple[str, str, int]:
     """Inject an explicit tag into one numbered display-math line."""
     if not line.strip() or _NO_NUMBER_LINE_RE.search(line):
-        return line, current_equation_index
+        return line, section_prefix, current_equation_index
 
     explicit_tag = _extract_explicit_tag_number(line)
     if explicit_tag:
-        parsed_index = _equation_suffix_index(explicit_tag, section_prefix)
-        if parsed_index is not None:
-            return line, parsed_index
-        return line, current_equation_index
+        parsed_number = _split_equation_number(explicit_tag)
+        if parsed_number is not None:
+            return line, parsed_number[0], parsed_number[1]
+        return line, section_prefix, current_equation_index
 
-    if not allow_insert:
-        return line, current_equation_index
+    effective_allow_insert = allow_insert or bool(_MANUAL_NUMBER_LINE_RE.search(line))
 
+    if not effective_allow_insert:
+        return line, section_prefix, current_equation_index
+
+    next_section_prefix = section_prefix
     next_index = current_equation_index + 1
-    number = f"{section_prefix}.{next_index}"
+    number = f"{next_section_prefix}.{next_index}"
     labels = [label.strip() for label in _EQ_LABEL_RE.findall(line)]
     for label in labels:
         aux_number = aux_ref_numbers.get(label)
         if aux_number:
             number = aux_number
-            parsed_index = _equation_suffix_index(aux_number, section_prefix)
-            if parsed_index is not None:
-                next_index = parsed_index
+            parsed_number = _split_equation_number(aux_number)
+            if parsed_number is not None:
+                next_section_prefix, next_index = parsed_number
             break
 
     if _HAS_TAG_RE.search(line):
-        return line, next_index
+        return line, next_section_prefix, next_index
 
-    return _insert_explicit_tag(line, number), next_index
+    return _insert_explicit_tag(line, number), next_section_prefix, next_index
 
 
 def _extract_explicit_tag_number(line: str) -> Optional[str]:
@@ -1040,13 +1051,12 @@ def _extract_explicit_tag_number(line: str) -> Optional[str]:
     return m.group(1).strip() or None
 
 
-def _equation_suffix_index(number: str, section_prefix: str) -> Optional[int]:
-    """Extract the trailing equation index from a number like '3.2.23'."""
-    prefix = f"{section_prefix}."
-    if not number.startswith(prefix):
+def _split_equation_number(number: str) -> Optional[tuple[str, int]]:
+    """Split a full equation number like '3.2.23' into ('3.2', 23)."""
+    match = _FULL_EQUATION_NUMBER_RE.fullmatch(number.strip())
+    if not match:
         return None
-    suffix = number[len(prefix):]
-    return int(suffix) if suffix.isdigit() else None
+    return match.group(1), int(match.group(2))
 
 
 def _insert_explicit_tag(line: str, number: str) -> str:
